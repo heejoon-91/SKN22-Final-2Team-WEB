@@ -6,11 +6,11 @@ psycopg2-binary==2.9.10
 sqlalchemy==2.0.48
 python-dotenv==1.2.2
 httpx==0.28.1
-qdrant-client==1.17.1
 langchain==1.2.12
 langgraph==1.1.2
 langchain-openai==1.1.11
 pandas==2.2.3
 pyarrow==19.0.1
 fastembed==0.4.1
+pgvector==0.3.6
 tqdm==4.67.1

@@ -1,9 +1,10 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
+
+from pipeline.utils import fetch_rows
 
 router = APIRouter()
 
 
 @router.get("/")
-async def list_products():
-    # TODO: PostgreSQL 상품 조회
-    return {"message": "TODO"}
+async def list_products(limit: int = Query(20, ge=1, le=100)):
+    return {"items": fetch_rows("products", limit=limit)}

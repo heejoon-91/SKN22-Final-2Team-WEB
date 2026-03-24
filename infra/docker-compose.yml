@@ -17,7 +17,7 @@ services:
 
   # ── Django (Auth / User / Pet / Order / Admin) ───────────────────────────────
   django:
-    image: leemdo/tailtalk-django:latest
+    image: tailtalk-django:latest
     build: ../services/django
     platform: linux/amd64
     command: >
@@ -34,8 +34,6 @@ services:
       POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
       POSTGRES_PORT: ${POSTGRES_PORT:-5432}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
-      QDRANT_HOST: ${QDRANT_HOST:-qdrant}
-      QDRANT_PORT: ${QDRANT_PORT:-6333}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       NAVER_CLIENT_ID: ${NAVER_CLIENT_ID:-}
@@ -61,7 +59,7 @@ services:
 
   # ── FastAPI (챗봇 / 추천) ────────────────────────────────────────────────────
   fastapi:
-    image: leemdo/tailtalk-fastapi:latest
+    image: tailtalk-fastapi:latest
     build: ../services/fastapi
     platform: linux/amd64
     command: uvicorn main:app --host 0.0.0.0 --port 8001 --workers 2
@@ -71,21 +69,18 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
       POSTGRES_PORT: ${POSTGRES_PORT:-5432}
-      QDRANT_HOST: ${QDRANT_HOST:-qdrant}
-      QDRANT_PORT: ${QDRANT_PORT:-6333}
+      DATABASE_URL: ${DATABASE_URL:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
     expose:
       - "8001"
     depends_on:
       postgres:
         condition: service_healthy
-      qdrant:
-        condition: service_started
     restart: unless-stopped
 
   # ── PostgreSQL 16 ────────────────────────────────────────────────────────────
   postgres:
-    image: postgres:16
+    image: pgvector/pgvector:pg16
     platform: linux/amd64
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -102,16 +97,5 @@ services:
       retries: 5
     restart: unless-stopped
 
-  # ── Qdrant (Vector DB) ───────────────────────────────────────────────────────
-  qdrant:
-    image: qdrant/qdrant
-    platform: linux/amd64
-    volumes:
-      - qdrant_data:/qdrant/storage
-    expose:
-      - "6333"
-    restart: unless-stopped
-
 volumes:
   postgres_data:
-  qdrant_data:
