@@ -19,17 +19,14 @@
 
 ## 2. PostgreSQL 복원
 
-> `docker compose up -d` 시 Django 컨테이너가 `migrate`를 자동 실행하므로 별도 마이그레이션 불필요.
+> 스키마는 Django migration이 생성하고, dump는 앱 데이터만 복원한다.
 
 ```bash
-# 1. 전체 서비스 실행 (migrate 자동 적용)
-cd infra && docker compose up -d
-
-# 2. 최신 덤프 자동 선택 복원
-./scripts/restore_postgres.sh
+# 1. 최신 덤프 자동 선택 복원
+bash scripts/setup_db.sh
 
 # 파일 직접 지정
-./scripts/restore_postgres.sh backup/data_20260319.dump
+bash scripts/setup_db.sh backup/data_20260319.dump
 ```
 
 ---
@@ -65,12 +62,7 @@ Gold ETL 결과가 변경됐을 때만 재생성한다.
 ### PostgreSQL 덤프
 
 ```bash
-docker exec tailtalk-postgres-1 pg_dump \
-  -U mungnyang -d tailtalk_db \
-  -t product -t product_category_tag -t review \
-  --data-only -F c \
-  -f /tmp/data_backup.dump
-docker cp tailtalk-postgres-1:/tmp/data_backup.dump backup/data_$(date +%Y%m%d).dump
+bash scripts/dump_db.sh backup/data_$(date +%Y%m%d).dump
 ```
 
 ### Qdrant 스냅샷

@@ -14,6 +14,7 @@
 ### setup_db.sh — 로컬 DB 셋업 / 복원
 
 덤프 파일로부터 로컬 DB를 셋업합니다.
+스키마는 Django migration이 만들고, dump는 앱 데이터만 복원합니다.
 
 ```bash
 # 기본: backup/ 폴더에서 최신 .dump 파일 자동 선택
@@ -32,17 +33,12 @@ bash scripts/setup_db.sh --list backup/tailtalk_db_20260324_150000.dump
 **동작 순서 (기본 모드)**:
 1. postgres 컨테이너 기동 + health check 대기
 2. 기존 DB DROP → CREATE
-3. pgvector 확장 설치
-4. pg_restore로 풀 복원 (스키마 + 데이터 + 인덱스)
+3. `python manage.py migrate --noinput` 실행
+4. pg_restore로 앱 데이터만 복원
 5. 테이블 현황 출력
 
-**복원 후 반드시 실행**:
-```bash
-cd services/django
-python manage.py migrate --fake
-```
-> 덤프에는 `django_migrations` 데이터가 포함되어 있지 않습니다.
-> `migrate --fake`는 현재 코드의 migration 파일을 기준으로 "이미 적용됨"으로 등록합니다.
+**복원 후 추가 명령은 필요 없습니다.**
+`setup_db.sh`가 migration까지 자동으로 처리합니다.
 
 ---
 
@@ -59,7 +55,8 @@ bash scripts/dump_db.sh backup/my_backup.dump
 ```
 
 **참고**:
-- `django_migrations` 테이블은 구조만 포함, 데이터는 제외됩니다
+- dump에는 스키마가 포함되지 않고 앱 데이터만 포함됩니다
+- 복원 시 `setup_db.sh`가 먼저 `migrate`를 실행해 스키마를 생성합니다
 - 덤프 형식: PostgreSQL custom format (`-Fc`, 압축됨)
 - 덤프 파일은 `.gitignore`에 포함하여 Git에 올리지 않습니다
 
@@ -77,10 +74,6 @@ cp infra/.env.example infra/.env
 
 # 3. DB 셋업 (backup/ 에 덤프 파일이 공유되어 있어야 함)
 bash scripts/setup_db.sh backup/tailtalk_db_20260324_150000.dump
-
-# 4. Django migration 동기화
-cd services/django
-python manage.py migrate --fake
 ```
 
 ---
