@@ -189,6 +189,24 @@ class _FakeHttpxClient:
         )
 
 
+class _IncompleteStreamHttpxClient:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def stream(self, method, url, headers=None, json=None):
+        return _FakeStreamResponse(
+            [
+                'data: {"type":"info","content":"응답 생성 중"}\n\n',
+            ]
+        )
+
+
 def _read_streaming_response(response):
     chunks = []
     for chunk in response.streaming_content:
@@ -259,6 +277,7 @@ class ChatProxyTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response["Content-Type"], "text/event-stream")
+        self.assertTrue(response["X-Request-Id"])
         payload = _read_streaming_response(response)
         self.assertIn('"type":"token"', payload)
         self.assertEqual(_FakeHttpxClient.last_stream_request["url"], settings.FASTAPI_INTERNAL_CHAT_URL)
@@ -267,6 +286,7 @@ class ChatProxyTests(TestCase):
             settings.INTERNAL_SERVICE_TOKEN,
         )
         self.assertEqual(_FakeHttpxClient.last_stream_request["headers"]["X-User-Id"], str(self.user.id))
+        self.assertEqual(_FakeHttpxClient.last_stream_request["headers"]["X-Request-Id"], response["X-Request-Id"])
         self.assertEqual(_FakeHttpxClient.last_stream_request["json"]["thread_id"], "thread-1")
         self.assertEqual(_FakeHttpxClient.last_stream_request["json"]["user_id"], str(self.user.id))
 
@@ -359,9 +379,11 @@ class ChatProxyTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response["Content-Type"], "text/event-stream")
+        self.assertTrue(response["X-Request-Id"])
         payload = _read_streaming_response(response)
         self.assertIn('"type":"done"', payload)
         self.assertEqual(_FakeHttpxClient.last_stream_request["url"], settings.FASTAPI_INTERNAL_CHAT_URL)
+        self.assertEqual(_FakeHttpxClient.last_stream_request["headers"]["X-Request-Id"], response["X-Request-Id"])
         self.assertEqual(_FakeHttpxClient.last_stream_request["json"]["message"], "hello")
         self.assertEqual(_FakeHttpxClient.last_stream_request["json"]["thread_id"], str(session.session_id))
         self.assertEqual(_FakeHttpxClient.last_stream_request["json"]["user_id"], str(self.user.id))
@@ -401,6 +423,30 @@ class ChatProxyTests(TestCase):
             [
                 ("user", "hello"),
                 ("assistant", "채팅 서버와 연결하지 못했습니다. 잠시 후 다시 시도해 주세요."),
+            ],
+        )
+
+    @patch("chat.api_views.httpx.Client", _IncompleteStreamHttpxClient)
+    def test_session_messages_proxy_emits_error_when_upstream_ends_without_terminal_event(self):
+        self.client.force_login(self.user)
+        session = ChatSession.objects.create(user=self.user, title="비정상 종료 세션")
+
+        response = self.client.post(
+            f"/api/chat/sessions/{session.session_id}/messages/",
+            data='{"message":"hello"}',
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = _read_streaming_response(response)
+        self.assertIn('"type": "error"', payload)
+        self.assertIn("응답 생성이 지연되고 있습니다. 잠시 후 다시 시도해 주세요.", payload)
+        messages = list(session.messages.order_by("created_at").values_list("role", "content"))
+        self.assertEqual(
+            messages,
+            [
+                ("user", "hello"),
+                ("assistant", "응답 생성이 지연되고 있습니다. 잠시 후 다시 시도해 주세요."),
             ],
         )
 

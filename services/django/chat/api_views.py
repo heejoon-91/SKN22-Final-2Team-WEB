@@ -1,4 +1,6 @@
 import json
+import time
+import uuid
 from datetime import timedelta
 
 import httpx
@@ -12,6 +14,16 @@ from pets.models import Pet
 from products.models import Product
 
 from .models import ChatMessage, ChatMessageRecommendation, ChatSession
+
+
+def _trace_log(event, request_id=None, **fields):
+    payload = {"request_id": request_id} if request_id else {}
+    payload.update({key: value for key, value in fields.items() if value is not None})
+    parts = " ".join(
+        f"{key}={json.dumps(value, ensure_ascii=False, default=str)}"
+        for key, value in sorted(payload.items())
+    )
+    print(f"[DJANGO_CHAT_TRACE] event={event} {parts}".rstrip())
 
 
 def _normalize_profile_context_type(raw_value):
@@ -29,11 +41,13 @@ def _chat_base_url():
     return settings.FASTAPI_INTERNAL_CHAT_URL.rstrip("/")
 
 
-def _internal_headers(user_id, include_content_type=True):
+def _internal_headers(user_id, include_content_type=True, request_id=None):
     headers = {
         "X-Internal-Service-Token": settings.INTERNAL_SERVICE_TOKEN,
         "X-User-Id": str(user_id),
     }
+    if request_id:
+        headers["X-Request-Id"] = str(request_id)
     if include_content_type:
         headers["Content-Type"] = "application/json"
     return headers
@@ -172,7 +186,7 @@ def _capture_sse_event(event_lines, capture):
             continue
 
     if not payload:
-        return
+        return None
 
     event_type = payload.get("type")
     if event_type == "token":
@@ -183,6 +197,7 @@ def _capture_sse_event(event_lines, capture):
         capture["error_message"] = payload.get("message") or "죄송합니다, 오류가 발생했습니다."
     elif event_type == "done":
         capture["completed"] = True
+    return event_type
 
 
 def _persist_recommended_products(message, product_cards):
@@ -211,12 +226,28 @@ def _persist_recommended_products(message, product_cards):
         ChatMessageRecommendation.objects.bulk_create(recommendations, ignore_conflicts=True)
 
 
-def _stream_fastapi_response(url, payload, user_id, capture=None):
-    headers = _internal_headers(user_id)
+def _stream_fastapi_response(url, payload, user_id, capture=None, request_id=None):
+    headers = _internal_headers(user_id, request_id=request_id)
+    started_at = time.perf_counter()
+    first_event_logged = False
+    _trace_log(
+        "stream_start",
+        request_id=request_id,
+        url=url,
+        thread_id=payload.get("thread_id"),
+        target_pet_id=payload.get("target_pet_id"),
+        message_chars=len(payload.get("message") or ""),
+    )
 
     try:
         with httpx.Client(timeout=_stream_timeout()) as client:
             with client.stream("POST", url, headers=headers, json=payload) as response:
+                _trace_log(
+                    "upstream_connected",
+                    request_id=request_id,
+                    status_code=response.status_code,
+                    elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+                )
                 if response.status_code != 200:
                     detail = "채팅 요청 처리에 실패했습니다."
                     try:
@@ -227,6 +258,7 @@ def _stream_fastapi_response(url, payload, user_id, capture=None):
                             detail = text
                     if capture is not None:
                         capture["error_message"] = detail
+                    _trace_log("upstream_non_200", request_id=request_id, detail=detail)
                     yield _stream_error_event(detail)
                     return
 
@@ -235,26 +267,97 @@ def _stream_fastapi_response(url, payload, user_id, capture=None):
                     for line in response.iter_lines():
                         if line == "":
                             if event_lines:
+                                event_type = None
                                 if capture is not None:
-                                    _capture_sse_event(event_lines, capture)
+                                    event_type = _capture_sse_event(event_lines, capture)
+                                if event_type is None:
+                                    event_type = _capture_sse_event(event_lines, {
+                                        "assistant_text": "",
+                                        "product_cards": [],
+                                        "error_message": None,
+                                        "completed": False,
+                                    })
+                                if event_type and not first_event_logged:
+                                    _trace_log(
+                                        "first_sse_event",
+                                        request_id=request_id,
+                                        event_type=event_type,
+                                        elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+                                    )
+                                    first_event_logged = True
+                                if event_type in {"error", "done", "products"}:
+                                    _trace_log(
+                                        "sse_event",
+                                        request_id=request_id,
+                                        event_type=event_type,
+                                        elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+                                    )
                                 yield "\n".join(event_lines) + "\n\n"
                                 event_lines = []
                             continue
                         event_lines.append(line)
 
                     if event_lines:
+                        event_type = None
                         if capture is not None:
-                            _capture_sse_event(event_lines, capture)
+                            event_type = _capture_sse_event(event_lines, capture)
+                        if event_type is None:
+                            event_type = _capture_sse_event(event_lines, {
+                                "assistant_text": "",
+                                "product_cards": [],
+                                "error_message": None,
+                                "completed": False,
+                            })
+                        if event_type and not first_event_logged:
+                            _trace_log(
+                                "first_sse_event",
+                                request_id=request_id,
+                                event_type=event_type,
+                                elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+                            )
+                            first_event_logged = True
+                        if event_type in {"error", "done", "products"}:
+                            _trace_log(
+                                "sse_event",
+                                request_id=request_id,
+                                event_type=event_type,
+                                elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+                            )
                         yield "\n".join(event_lines) + "\n\n"
+
+                    if not (capture and (capture["completed"] or capture["error_message"])):
+                        detail = "응답 생성이 지연되고 있습니다. 잠시 후 다시 시도해 주세요."
+                        if capture is not None:
+                            capture["error_message"] = detail
+                        _trace_log(
+                            "stream_missing_terminal_event",
+                            request_id=request_id,
+                            elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+                        )
+                        yield _stream_error_event(detail)
                 except httpx.HTTPError as exc:
                     detail, _ = _map_upstream_exception(exc)
                     if capture is not None:
                         capture["error_message"] = detail
+                    _trace_log(
+                        "stream_iter_error",
+                        request_id=request_id,
+                        error_type=type(exc).__name__,
+                        detail=detail,
+                        elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+                    )
                     yield _stream_error_event(detail)
     except httpx.HTTPError as exc:
         detail, _ = _map_upstream_exception(exc)
         if capture is not None:
             capture["error_message"] = detail
+        _trace_log(
+            "stream_connect_error",
+            request_id=request_id,
+            error_type=type(exc).__name__,
+            detail=detail,
+            elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+        )
         yield _stream_error_event(detail)
 
 
@@ -279,7 +382,7 @@ def _build_chat_payload(payload, user_id, thread_id=None, target_pet_id=None):
     return safe_payload
 
 
-def _persist_streamed_response(session, url, payload, user_id):
+def _persist_streamed_response(session, url, payload, user_id, request_id=None):
     capture = {
         "assistant_text": "",
         "error_message": None,
@@ -288,7 +391,7 @@ def _persist_streamed_response(session, url, payload, user_id):
     }
 
     try:
-        for chunk in _stream_fastapi_response(url, payload, user_id, capture=capture):
+        for chunk in _stream_fastapi_response(url, payload, user_id, capture=capture, request_id=request_id):
             yield chunk
     finally:
         content = ""
@@ -301,6 +404,15 @@ def _persist_streamed_response(session, url, payload, user_id):
             assistant_message = ChatMessage.objects.create(session=session, role="assistant", content=content)
             _persist_recommended_products(assistant_message, capture["product_cards"])
             _touch_session(session)
+            _trace_log(
+                "persist_streamed_response",
+                request_id=request_id,
+                session_id=str(session.session_id),
+                completed=capture["completed"],
+                error=bool(capture["error_message"]),
+                product_cards=len(capture["product_cards"]),
+                content_chars=len(content),
+            )
 
 
 def _require_authenticated(request):
@@ -324,14 +436,24 @@ def chat_proxy_view(request):
     if not message:
         return JsonResponse({"detail": "message is required."}, status=400)
 
+    request_id = request.headers.get("X-Request-Id") or str(uuid.uuid4())
     safe_payload = _build_chat_payload(payload, request.user.id, target_pet_id=payload.get("target_pet_id"))
+    _trace_log(
+        "chat_proxy_request",
+        request_id=request_id,
+        user_id=request.user.id,
+        thread_id=safe_payload.get("thread_id"),
+        target_pet_id=safe_payload.get("target_pet_id"),
+        message_chars=len(message),
+    )
 
     return StreamingHttpResponse(
-        _stream_fastapi_response(_chat_base_url() + "/", safe_payload, request.user.id),
+        _stream_fastapi_response(_chat_base_url() + "/", safe_payload, request.user.id, request_id=request_id),
         content_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
+            "X-Request-Id": request_id,
         },
     )
 
@@ -463,17 +585,33 @@ def session_messages_proxy_view(request, session_id):
     ChatMessage.objects.create(session=session, role="user", content=message)
     _touch_session(session)
 
+    request_id = request.headers.get("X-Request-Id") or str(uuid.uuid4())
     safe_payload = _build_chat_payload(
         payload,
         request.user.id,
         thread_id=session.session_id,
         target_pet_id=session.target_pet_id,
     )
+    _trace_log(
+        "session_message_proxy_request",
+        request_id=request_id,
+        user_id=request.user.id,
+        session_id=str(session.session_id),
+        target_pet_id=str(session.target_pet_id) if session.target_pet_id else None,
+        message_chars=len(message),
+    )
     return StreamingHttpResponse(
-        _persist_streamed_response(session, _chat_base_url() + "/", safe_payload, request.user.id),
+        _persist_streamed_response(
+            session,
+            _chat_base_url() + "/",
+            safe_payload,
+            request.user.id,
+            request_id=request_id,
+        ),
         content_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
+            "X-Request-Id": request_id,
         },
     )
